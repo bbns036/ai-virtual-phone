@@ -1,0 +1,92 @@
+import { NextResponse } from "next/server";
+import webpush from "web-push";
+import { getStore } from "@netlify/blobs";
+
+const PUSH_STORE_NAME = "push-subscriptions";
+
+export async function POST(request: Request) {
+  try {
+    const { title, body, icon } = await request.json();
+
+    if (!title || !body) {
+      return NextResponse.json(
+        { error: "Missing title or body" },
+        { status: 400 },
+      );
+    }
+
+    const email = process.env.VAPID_EMAIL;
+    const publicKey = process.env.VAPID_PUBLIC_KEY;
+    const privateKey = process.env.VAPID_PRIVATE_KEY;
+
+    if (!email || !publicKey || !privateKey) {
+      console.error("[Push] VAPID environment variables are missing");
+
+      return NextResponse.json(
+        { error: "Push server is not configured" },
+        { status: 500 },
+      );
+    }
+
+    webpush.setVapidDetails(
+      `mailto:${email}`,
+      publicKey,
+      privateKey,
+    );
+
+    const store = getStore(PUSH_STORE_NAME);
+    const { blobs } = await store.list();
+
+    let sent = 0;
+    let removed = 0;
+
+    for (const blob of blobs) {
+      try {
+        const subscription = await store.get(blob.key, {
+          type: "json",
+        });
+
+        if (!subscription?.endpoint) continue;
+
+        await webpush.sendNotification(
+          subscription,
+          JSON.stringify({
+            title,
+            body,
+            icon: icon || "/icon-192.png",
+          }),
+        );
+
+        sent++;
+      } catch (error: unknown) {
+        const statusCode =
+          typeof error === "object" &&
+          error !== null &&
+          "statusCode" in error
+            ? (error as { statusCode?: number }).statusCode
+            : undefined;
+
+        // 订阅已经失效，直接删除。
+        if (statusCode === 404 || statusCode === 410) {
+          await store.delete(blob.key);
+          removed++;
+        } else {
+          console.error("[Push] Failed to send:", error);
+        }
+      }
+    }
+
+    return NextResponse.json({
+      ok: true,
+      sent,
+      removed,
+    });
+  } catch (error) {
+    console.error("[Push] Send failed:", error);
+
+    return NextResponse.json(
+      { error: "Failed to send push notification" },
+      { status: 500 },
+    );
+  }
+}
